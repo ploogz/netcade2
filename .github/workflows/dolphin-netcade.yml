@@ -1,7 +1,5 @@
 name: Build Netcade Dolphin (Windows)
 
-# Builds Dolphin with Netcade's patch (dolphin-netcade/netcade.patch) for Windows and publishes it as
-# a GitHub Release asset (dolphin-netcade.7z). Run it from the Actions tab: "Run workflow".
 on:
   workflow_dispatch:
     inputs:
@@ -20,23 +18,38 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 150
     steps:
+      - name: Keep line endings unchanged
+        run: git config --global core.autocrlf false
+
       - name: Netcade sources
         uses: actions/checkout@v4
         with:
           path: netcade
 
-      - name: Dolphin sources (with submodules)
+      - name: Dolphin sources
         uses: actions/checkout@v4
         with:
           repository: dolphin-emu/dolphin
           ref: ${{ inputs.dolphin_tag }}
           path: dolphin
-          submodules: recursive
           fetch-depth: 1
+
+      - name: Dolphin libraries (submodules)
+        working-directory: dolphin
+        run: |
+          git submodule update --init --recursive --depth 1 --jobs 8
+          if ($LASTEXITCODE -ne 0) {
+            "Shallow download missed a pinned version; fetching full history instead" | Out-Host
+            git submodule update --init --recursive --jobs 8
+          }
+          git submodule status --recursive | Select-String '^-' | ForEach-Object { throw "Missing library: $_" }
 
       - name: Apply Netcade patch
         working-directory: dolphin
-        run: git apply --whitespace=nowarn ../netcade/dolphin-netcade/netcade.patch
+        run: |
+          git apply --check -v --whitespace=nowarn ../netcade/dolphin-netcade/netcade.patch
+          if ($LASTEXITCODE -ne 0) { throw 'The Netcade patch does not apply to this Dolphin version' }
+          git apply --whitespace=nowarn ../netcade/dolphin-netcade/netcade.patch
 
       - name: Visual Studio build tools
         uses: ilammy/msvc-dev-cmd@v1
@@ -68,7 +81,7 @@ jobs:
           $tag = "dolphin-${{ inputs.build_name }}"
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag dolphin-netcade.7z --repo $env:GITHUB_REPOSITORY --title "Dolphin ${{ inputs.build_name }} (Netcade build)" --notes "Dolphin ${{ inputs.dolphin_tag }} with Netcade's NetPlay patch (source: dolphin-netcade/netcade.patch in this repository). Netcade downloads this automatically."
+            gh release create $tag dolphin-netcade.7z --repo $env:GITHUB_REPOSITORY --title "Dolphin ${{ inputs.build_name }} (Netcade build)" --notes "Dolphin ${{ inputs.dolphin_tag }} with Netcade's NetPlay patch. Netcade downloads this automatically."
           } else {
             gh release upload $tag dolphin-netcade.7z --repo $env:GITHUB_REPOSITORY --clobber
           }
