@@ -1,0 +1,76 @@
+name: Build Netcade Dolphin (Windows)
+
+# Builds Dolphin with Netcade's patch (dolphin-netcade/netcade.patch) for Windows and publishes it as
+# a GitHub Release asset (dolphin-netcade.7z). Run it from the Actions tab: "Run workflow".
+on:
+  workflow_dispatch:
+    inputs:
+      dolphin_tag:
+        description: Dolphin release to build (must match launcher/emulators.json)
+        default: '2609a'
+      build_name:
+        description: Netcade build name (must match dolphin.netcade.version in emulators.json)
+        default: '2609a-netcade1'
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 150
+    steps:
+      - name: Netcade sources
+        uses: actions/checkout@v4
+        with:
+          path: netcade
+
+      - name: Dolphin sources (with submodules)
+        uses: actions/checkout@v4
+        with:
+          repository: dolphin-emu/dolphin
+          ref: ${{ inputs.dolphin_tag }}
+          path: dolphin
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Apply Netcade patch
+        working-directory: dolphin
+        run: git apply --whitespace=nowarn ../netcade/dolphin-netcade/netcade.patch
+
+      - name: Visual Studio build tools
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        working-directory: dolphin
+        run: cmake --preset ninja-release-x64 -DENABLE_AUTOUPDATE=OFF -DENABLE_ANALYTICS=OFF -DUSE_DISCORD_PRESENCE=OFF
+
+      - name: Build
+        working-directory: dolphin
+        run: cmake --build --preset ninja-build-release-x64
+
+      - name: Package
+        shell: pwsh
+        run: ./netcade/dolphin-netcade/package-windows.ps1 -DolphinDir dolphin -BuildName "${{ inputs.build_name }}" -Out dolphin-netcade.7z
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dolphin-netcade
+          path: dolphin-netcade.7z
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "dolphin-${{ inputs.build_name }}"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag dolphin-netcade.7z --repo $env:GITHUB_REPOSITORY --title "Dolphin ${{ inputs.build_name }} (Netcade build)" --notes "Dolphin ${{ inputs.dolphin_tag }} with Netcade's NetPlay patch (source: dolphin-netcade/netcade.patch in this repository). Netcade downloads this automatically."
+          } else {
+            gh release upload $tag dolphin-netcade.7z --repo $env:GITHUB_REPOSITORY --clobber
+          }
+          "Download link:" | Out-Host
+          "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/dolphin-netcade.7z" | Out-Host
