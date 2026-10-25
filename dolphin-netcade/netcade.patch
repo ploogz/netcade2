@@ -1,0 +1,835 @@
+diff --git a/Source/Core/DolphinQt/CMakeLists.txt b/Source/Core/DolphinQt/CMakeLists.txt
+index 599bc54..dd71ff8 100644
+--- a/Source/Core/DolphinQt/CMakeLists.txt
++++ b/Source/Core/DolphinQt/CMakeLists.txt
+@@ -319,6 +319,8 @@ add_executable(dolphin-emu
+   NetPlay/NetPlayBrowser.h
+   NetPlay/NetPlayDialog.cpp
+   NetPlay/NetPlayDialog.h
++  NetPlay/NetcadeBridge.cpp
++  NetPlay/NetcadeBridge.h
+   NetPlay/NetPlaySetupDialog.cpp
+   NetPlay/NetPlaySetupDialog.h
+   NetPlay/PadMappingDialog.cpp
+diff --git a/Source/Core/DolphinQt/Main.cpp b/Source/Core/DolphinQt/Main.cpp
+index 7f8f9b9..ed2a09b 100644
+--- a/Source/Core/DolphinQt/Main.cpp
++++ b/Source/Core/DolphinQt/Main.cpp
+@@ -278,6 +278,19 @@ int main(int argc, char* argv[])
+     MainWindow win{Core::System::GetInstance(), std::move(boot),
+                    static_cast<const char*>(options.get("movie"))};
+ 
++    if (options.is_set("netcade_host") || options.is_set("netcade_join"))
++    {
++      const bool host = options.is_set("netcade_host");
++      const std::string game =
++          static_cast<const char*>(options.get(host ? "netcade_host" : "netcade_join"));
++      const std::string port = options.is_set("netcade_control") ?
++                                   static_cast<const char*>(options.get("netcade_control")) :
++                                   "";
++      const char* const token = std::getenv("NETCADE_TOKEN");
++      win.StartNetcadeSession(game, host, static_cast<u16>(std::strtoul(port.c_str(), nullptr, 10)),
++                              token ? token : "");
++    }
++
+ #if defined(USE_ANALYTICS) && USE_ANALYTICS
+     if (!Config::Get(Config::MAIN_ANALYTICS_PERMISSION_ASKED))
+     {
+diff --git a/Source/Core/DolphinQt/MainWindow.cpp b/Source/Core/DolphinQt/MainWindow.cpp
+index 688ae6f..12309c2 100644
+--- a/Source/Core/DolphinQt/MainWindow.cpp
++++ b/Source/Core/DolphinQt/MainWindow.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "DolphinQt/MainWindow.h"
+ 
++#include <QTimer>
+ #include <QApplication>
+ #include <QCloseEvent>
+ #include <QDateTime>
+@@ -62,6 +63,7 @@
+ #include "Core/HotkeyManager.h"
+ #include "Core/IOS/USB/Bluetooth/BTEmu.h"
+ #include "Core/Movie.h"
++#include "Core/SyncIdentifier.h"
+ #include "Core/NetPlayClient.h"
+ #include "Core/NetPlayProto.h"
+ #include "Core/NetPlayServer.h"
+@@ -1755,6 +1757,50 @@ bool MainWindow::NetPlayHost(const UICommon::GameFile& game)
+   return NetPlayJoin();
+ }
+ 
++void MainWindow::StartNetcadeSession(const std::string& game_path, bool host, u16 control_port,
++                                     const std::string& token)
++{
++  if (control_port != 0)
++  {
++    m_netplay_dialog->EnableNetcade(control_port, token);
++    setWindowState(windowState() | Qt::WindowMinimized);
++  }
++
++  // Dolphin decides who "has the game" by looking in its game list once, when a player joins, so
++  // wait until our copy is listed (up to 30 seconds on a first, uncached scan).
++  auto game = std::make_shared<const UICommon::GameFile>(game_path);
++  auto* timer = new QTimer(this);
++  auto attempts = std::make_shared<int>(0);
++  connect(timer, &QTimer::timeout, this, [this, timer, game, attempts, host] {
++    bool listed = false;
++    if (game->IsValid())
++    {
++      const auto& model = m_game_list->GetGameListModel();
++      for (int i = 0; i < model.rowCount(QModelIndex()) && !listed; ++i)
++      {
++        listed = model.GetGameFile(i)->CompareSyncIdentifier(game->GetSyncIdentifier()) ==
++                 NetPlay::SyncIdentifierComparison::SameGame;
++      }
++    }
++    if (!listed && game->IsValid() && ++*attempts < 120)
++      return;
++
++    timer->stop();
++    timer->deleteLater();
++    if (!game->IsValid())
++      m_netplay_dialog->NetcadeNotify("failed", "unreadable-game");
++    else if (!listed)
++      m_netplay_dialog->NetcadeNotify("gameNotListed");
++
++    if (host && !game->IsValid())
++      return;
++    const bool ok = host ? NetPlayHost(*game) : NetPlayJoin();
++    if (!ok)
++      m_netplay_dialog->NetcadeNotify("failed", host ? "host" : "join");
++  });
++  timer->start(250);
++}
++
+ void MainWindow::NetPlayQuit()
+ {
+   Settings::Instance().ResetNetPlayClient();
+diff --git a/Source/Core/DolphinQt/MainWindow.h b/Source/Core/DolphinQt/MainWindow.h
+index 93490ea..903ca9e 100644
+--- a/Source/Core/DolphinQt/MainWindow.h
++++ b/Source/Core/DolphinQt/MainWindow.h
+@@ -95,6 +95,11 @@ public:
+ 
+   void ShowTriforceWindow();
+ 
++  // Netcade launcher: host or join a NetPlay session as soon as the game shows up in the game list.
++  // With a control port, Netcade runs the session and the NetPlay window stays hidden.
++  void StartNetcadeSession(const std::string& game_path, bool host, u16 control_port,
++                           const std::string& token);
++
+ signals:
+   void ReadOnlyModeChanged(bool read_only);
+   void RecordingStatusChanged(bool recording);
+diff --git a/Source/Core/DolphinQt/NetPlay/NetPlayDialog.cpp b/Source/Core/DolphinQt/NetPlay/NetPlayDialog.cpp
+index c4ebae4..18ae032 100644
+--- a/Source/Core/DolphinQt/NetPlay/NetPlayDialog.cpp
++++ b/Source/Core/DolphinQt/NetPlay/NetPlayDialog.cpp
+@@ -52,6 +52,7 @@
+ #include "DolphinQt/NetPlay/ClickBlurLabel.h"
+ #include "DolphinQt/NetPlay/GameDigestDialog.h"
+ #include "DolphinQt/NetPlay/GameListDialog.h"
++#include "DolphinQt/NetPlay/NetcadeBridge.h"
+ #include "DolphinQt/NetPlay/PadMappingDialog.h"
+ #include "DolphinQt/QtUtils/ModalMessageBox.h"
+ #include "DolphinQt/QtUtils/QueueOnObject.h"
+@@ -451,6 +452,7 @@ void NetPlayDialog::OnChat()
+ 
+ void NetPlayDialog::OnIndexAdded(bool success, const std::string error)
+ {
++  NetcadeNotify(success ? "indexed" : "indexFailed", error);
+   DisplayMessage(success ? tr("Successfully added to the NetPlay index") :
+                            tr("Failed to add this session to the NetPlay index: %1")
+                                .arg(QString::fromStdString(error)),
+@@ -494,6 +496,13 @@ void NetPlayDialog::OnStart()
+ 
+ void NetPlayDialog::reject()
+ {
++  if (IsNetcadeHidden())
++  {
++    hide();
++    SendNetcadeState();
++    return;
++  }
++
+   if (ModalMessageBox::question(this, tr("Confirmation"),
+                                 tr("Are you sure you want to quit NetPlay?")) == QMessageBox::Yes)
+   {
+@@ -546,7 +555,8 @@ void NetPlayDialog::show(std::string nickname, bool use_traversal)
+ 
+   SetOptionsEnabled(true);
+ 
+-  QDialog::show();
++  if (!IsNetcadeHidden())
++    QDialog::show();
+   UpdateGUI();
+ }
+ 
+@@ -685,6 +695,8 @@ void NetPlayDialog::UpdateGUI()
+     m_old_player_count = m_player_count;
+   }
+ 
++  SendNetcadeState();
++
+   if (!server)
+     return;
+ 
+@@ -786,6 +798,15 @@ void NetPlayDialog::Update()
+ 
+ void NetPlayDialog::DisplayMessage(const QString& msg, const std::string& color, int duration)
+ {
++  if (m_netcade)
++  {
++    picojson::object message;
++    message["ev"] = picojson::value("msg");
++    message["text"] = picojson::value(msg.toStdString());
++    message["color"] = picojson::value(color);
++    m_netcade->Send(message);
++  }
++
+   QueueOnObject(m_chat_edit, [this, color, msg] {
+     m_chat_edit->append(QStringLiteral("<font color='%1'>%2</font>")
+                             .arg(QString::fromStdString(color), msg.toHtmlEscaped()));
+@@ -863,6 +884,7 @@ void NetPlayDialog::SetOptionsEnabled(bool enabled)
+ 
+ void NetPlayDialog::OnMsgStartGame()
+ {
++  NetcadeNotify("started");
+   DisplayMessage(tr("Started game"), "green");
+ 
+   g_netplay_chat_ui =
+@@ -889,6 +911,7 @@ void NetPlayDialog::OnMsgStartGame()
+ 
+ void NetPlayDialog::OnMsgStopGame()
+ {
++  NetcadeNotify("stopped");
+   g_netplay_chat_ui.reset();
+   g_netplay_golf_ui.reset();
+   QueueOnObject(this, [this] { UpdateDiscordPresence(); });
+@@ -960,6 +983,7 @@ void NetPlayDialog::OnHostInputAuthorityChanged(bool enabled)
+ 
+ void NetPlayDialog::OnDesync(u32 frame, const std::string& player)
+ {
++  NetcadeNotify("desync", fmt::format("{}@{}", player, frame));
+   DisplayMessage(tr("Possible desync detected: %1 might have desynced at frame %2")
+                      .arg(QString::fromStdString(player), QString::number(frame)),
+                  "red", OSD::Duration::VERY_LONG);
+@@ -967,12 +991,16 @@ void NetPlayDialog::OnDesync(u32 frame, const std::string& player)
+ 
+ void NetPlayDialog::OnConnectionLost()
+ {
++  NetcadeNotify("lost");
+   DisplayMessage(tr("Lost connection to NetPlay server..."), "red");
+ }
+ 
+ void NetPlayDialog::OnConnectionError(const std::string& message)
+ {
++  NetcadeNotify("error", message);
+   QueueOnObject(this, [this, message] {
++    if (IsNetcadeHidden())
++      return;  // Netcade explains it in its own window
+     ModalMessageBox::critical(this, tr("Error"),
+                               tr("Failed to connect to server: %1").arg(tr(message.c_str())));
+   });
+@@ -1016,6 +1044,7 @@ void NetPlayDialog::OnTraversalStateChanged(Common::TraversalClient::State state
+ 
+ void NetPlayDialog::OnGameStartAborted()
+ {
++  NetcadeNotify("startAborted");
+   QueueOnObject(this, [this] { SetOptionsEnabled(true); });
+ }
+ 
+@@ -1271,3 +1300,321 @@ void NetPlayDialog::SetHostWiiSyncData(std::vector<u64> titles, std::string redi
+   if (client)
+     client->SetWiiSyncData(nullptr, std::move(titles), std::move(redirect_folder));
+ }
++
++// ---------------------------------------------------------------------------------- Netcade
++
++namespace
++{
++const char* NetcadeStatusName(NetPlay::SyncIdentifierComparison status)
++{
++  switch (status)
++  {
++  case NetPlay::SyncIdentifierComparison::SameGame:
++    return "ok";
++  case NetPlay::SyncIdentifierComparison::DifferentHash:
++    return "wrongHash";
++  case NetPlay::SyncIdentifierComparison::DifferentDiscNumber:
++    return "wrongDisc";
++  case NetPlay::SyncIdentifierComparison::DifferentRevision:
++    return "wrongRevision";
++  case NetPlay::SyncIdentifierComparison::DifferentRegion:
++    return "wrongRegion";
++  case NetPlay::SyncIdentifierComparison::DifferentGame:
++    return "missing";
++  default:
++    return "unknown";
++  }
++}
++
++std::string GetString(const picojson::object& object, const char* key)
++{
++  const auto it = object.find(key);
++  return it != object.end() && it->second.is<std::string>() ? it->second.get<std::string>() : "";
++}
++}  // namespace
++
++void NetPlayDialog::EnableNetcade(u16 control_port, const std::string& token)
++{
++  m_netcade = std::make_unique<NetcadeBridge>(
++      control_port, token,
++      [this](picojson::object command) {
++        QueueOnObject(this, [this, command = std::move(command)] { OnNetcadeCommand(command); });
++      },
++      [this](bool connected) {
++        QueueOnObject(this, [this, connected] {
++          m_netcade_lost = !connected;
++          if (connected)
++          {
++            SendNetcadeState();
++          }
++          else if (Settings::Instance().GetNetPlayClient() && !isVisible())
++          {
++            // Netcade is gone: hand the session back to the player
++            QDialog::show();
++            raise();
++          }
++        });
++      });
++}
++
++bool NetPlayDialog::IsNetcadeHidden() const
++{
++  return m_netcade && !m_netcade_lost;
++}
++
++void NetPlayDialog::NetcadeNotify(const std::string& event, const std::string& detail)
++{
++  if (!m_netcade)
++    return;
++  picojson::object message;
++  message["ev"] = picojson::value(event);
++  if (!detail.empty())
++    message["detail"] = picojson::value(detail);
++  m_netcade->Send(message);
++}
++
++void NetPlayDialog::SendNetcadeState()
++{
++  if (!m_netcade)
++    return;
++  const auto client = Settings::Instance().GetNetPlayClient();
++  const auto server = Settings::Instance().GetNetPlayServer();
++  if (!client)
++    return;
++
++  const NetPlay::PadMappingArray& pads = client->GetPadMapping();
++  picojson::array players;
++  for (const NetPlay::Player* player : client->GetPlayers())
++  {
++    double port = 0;
++    for (std::size_t i = 0; i < pads.size(); ++i)
++    {
++      if (pads[i] == player->pid)
++      {
++        port = static_cast<double>(i + 1);
++        break;
++      }
++    }
++    picojson::object entry;
++    entry["pid"] = picojson::value(static_cast<double>(player->pid));
++    entry["name"] = picojson::value(player->name);
++    entry["ping"] = picojson::value(static_cast<double>(player->ping));
++    entry["revision"] = picojson::value(player->revision);
++    entry["status"] = picojson::value(NetcadeStatusName(player->game_status));
++    entry["port"] = picojson::value(port);
++    entry["host"] = picojson::value(player->IsHost());
++    players.emplace_back(entry);
++  }
++
++  std::string savedata = "none";
++  if (m_savedata_load_and_write_action->isChecked())
++    savedata = "write";
++  else if (m_savedata_load_only_action->isChecked())
++    savedata = "load";
++  std::string network_mode = "fixeddelay";
++  if (m_host_input_authority_action->isChecked())
++    network_mode = "hostinputauthority";
++  else if (m_golf_mode_action->isChecked())
++    network_mode = "golf";
++
++  picojson::object options;
++  options["savedata"] = picojson::value(savedata);
++  options["syncAllWii"] = picojson::value(m_savedata_all_wii_saves_action->isChecked());
++  options["syncCodes"] = picojson::value(m_sync_codes_action->isChecked());
++  options["strictSync"] = picojson::value(m_strict_settings_sync_action->isChecked());
++  options["recordInputs"] = picojson::value(m_record_input_action->isChecked());
++  options["networkMode"] = picojson::value(network_mode);
++  options["golfOverlay"] = picojson::value(m_golf_mode_overlay_action->isChecked());
++  options["hideRemoteGbas"] = picojson::value(m_hide_remote_gbas_action->isChecked());
++
++  picojson::object state;
++  state["ev"] = picojson::value("state");
++  state["hosting"] = picojson::value(server != nullptr);
++  state["players"] = picojson::value(players);
++  state["buffer"] = picojson::value(static_cast<double>(m_buffer_size_box->value()));
++  state["hostInputAuthority"] = picojson::value(m_host_input_authority);
++  state["running"] = picojson::value(Core::IsRunning(Core::System::GetInstance()));
++  state["optionsEditable"] = picojson::value(server != nullptr && m_start_button->isEnabled());
++  state["game"] = picojson::value(m_current_game_name);
++  state["windowVisible"] = picojson::value(isVisible());
++  state["options"] = picojson::value(options);
++  m_netcade->Send(state);
++}
++
++std::string NetPlayDialog::NetcadeStartGame(bool force)
++{
++  const auto client = Settings::Instance().GetNetPlayClient();
++  const auto server = Settings::Instance().GetNetPlayServer();
++  if (!client || !server)
++    return "not-host";
++  if (!m_start_button->isEnabled())
++    return "already-running";
++  if (!force && !client->DoAllPlayersHaveGame())
++    return "not-all-have-game";
++  if (m_strict_settings_sync_action->isChecked() && Config::Get(Config::GFX_EFB_SCALE) == 0)
++    return "strict-sync-needs-fixed-resolution";
++  if (!FindGameFile(m_current_game_identifier))
++    return "game-not-in-list";
++  if (!server->RequestStartGame())
++    return "start-refused";
++  SetOptionsEnabled(false);
++  return {};
++}
++
++std::string NetPlayDialog::ApplyNetcadeOptions(const picojson::object& options)
++{
++  const bool host_can_edit =
++      Settings::Instance().GetNetPlayServer() != nullptr && m_start_button->isEnabled();
++  const auto set_flag = [&options](const char* key, QAction* action) {
++    const auto it = options.find(key);
++    if (it != options.end() && it->second.is<bool>() && action->isEnabled())
++      action->setChecked(it->second.get<bool>());
++  };
++
++  // the one option every player has, as in the window
++  set_flag("recordInputs", m_record_input_action);
++  if (!host_can_edit)
++    return options.size() == 1 && options.contains("recordInputs") ? "" : "host-only-before-start";
++
++  const std::string savedata = GetString(options, "savedata");
++  if (savedata == "none")
++    m_savedata_none_action->setChecked(true);
++  else if (savedata == "load")
++    m_savedata_load_only_action->setChecked(true);
++  else if (savedata == "write")
++    m_savedata_load_and_write_action->setChecked(true);
++
++  const std::string network_mode = GetString(options, "networkMode");
++  if (network_mode == "fixeddelay")
++    m_fixed_delay_action->setChecked(true);
++  else if (network_mode == "hostinputauthority")
++    m_host_input_authority_action->setChecked(true);
++  else if (network_mode == "golf")
++    m_golf_mode_action->setChecked(true);
++
++  set_flag("syncAllWii", m_savedata_all_wii_saves_action);
++  set_flag("syncCodes", m_sync_codes_action);
++  set_flag("strictSync", m_strict_settings_sync_action);
++  set_flag("golfOverlay", m_golf_mode_overlay_action);
++  set_flag("hideRemoteGbas", m_hide_remote_gbas_action);
++  return {};
++}
++
++void NetPlayDialog::OnNetcadeCommand(const picojson::object& command)
++{
++  const auto client = Settings::Instance().GetNetPlayClient();
++  const auto server = Settings::Instance().GetNetPlayServer();
++  const std::string cmd = GetString(command, "cmd");
++  std::string error;
++
++  const auto find_pid = [&client](const std::string& name) -> NetPlay::PlayerId {
++    if (!client || name.empty())
++      return 0;
++    for (const NetPlay::Player* player : client->GetPlayers())
++    {
++      if (player->name == name)
++        return player->pid;
++    }
++    return 0;
++  };
++
++  if (cmd == "show")
++  {
++    QDialog::show();
++    raise();
++    activateWindow();
++  }
++  else if (cmd == "hide")
++  {
++    hide();
++  }
++  else if (cmd == "state")
++  {
++    // answered below
++  }
++  else if (cmd == "start")
++  {
++    const auto it = command.find("force");
++    error = NetcadeStartGame(it != command.end() && it->second.is<bool>() && it->second.get<bool>());
++  }
++  else if (cmd == "pads")
++  {
++    // ports: ["name on GC port 1", "port 2", "port 3", "port 4"], "" for an empty port
++    const auto it = command.find("ports");
++    if (!server)
++      error = "not-host";
++    else if (!m_start_button->isEnabled())
++      error = "game-running";
++    else if (it == command.end() || !it->second.is<picojson::array>())
++      error = "bad-ports";
++    else
++    {
++      NetPlay::PadMappingArray mapping{};
++      const auto& ports = it->second.get<picojson::array>();
++      for (std::size_t i = 0; i < mapping.size() && i < ports.size(); ++i)
++      {
++        if (ports[i].is<std::string>())
++          mapping[i] = find_pid(ports[i].get<std::string>());
++      }
++      server->SetPadMapping(mapping);
++    }
++  }
++  else if (cmd == "buffer")
++  {
++    const auto it = command.find("value");
++    if (it == command.end() || !it->second.is<double>())
++      error = "bad-value";
++    else if (!m_buffer_size_box->isEnabled())
++      error = "buffer-locked";
++    else
++      m_buffer_size_box->setValue(std::clamp(static_cast<int>(it->second.get<double>()), 0,
++                                             static_cast<int>(NetPlay::MAX_TARGET_PAD_BUFFER_SIZE)));
++  }
++  else if (cmd == "options")
++  {
++    const auto it = command.find("options");
++    if (it == command.end() || !it->second.is<picojson::object>())
++      error = "bad-options";
++    else
++      error = ApplyNetcadeOptions(it->second.get<picojson::object>());
++  }
++  else if (cmd == "recheck")
++  {
++    // makes every player look for the game again (e.g. after their game list finished loading)
++    if (!server)
++      error = "not-host";
++    else if (m_start_button->isEnabled() && !m_current_game_name.empty())
++      server->ChangeGame(m_current_game_identifier, m_current_game_name);
++  }
++  else if (cmd == "kick")
++  {
++    const NetPlay::PlayerId pid = find_pid(GetString(command, "name"));
++    if (!server)
++      error = "not-host";
++    else if (pid <= 1)
++      error = "no-such-player";
++    else
++      server->KickPlayer(pid);
++  }
++  else if (cmd == "chat")
++  {
++    const std::string text = GetString(command, "text");
++    if (!text.empty())
++      SendMessage(text);
++  }
++  else
++  {
++    error = "unknown-command";
++  }
++
++  picojson::object reply;
++  reply["ev"] = picojson::value("result");
++  reply["cmd"] = picojson::value(cmd);
++  reply["ok"] = picojson::value(error.empty());
++  if (!error.empty())
++    reply["error"] = picojson::value(error);
++  if (const auto id = command.find("id"); id != command.end())
++    reply["id"] = id->second;
++  m_netcade->Send(reply);
++  SendNetcadeState();
++}
+diff --git a/Source/Core/DolphinQt/NetPlay/NetPlayDialog.h b/Source/Core/DolphinQt/NetPlay/NetPlayDialog.h
+index 54cc111..84c215e 100644
+--- a/Source/Core/DolphinQt/NetPlay/NetPlayDialog.h
++++ b/Source/Core/DolphinQt/NetPlay/NetPlayDialog.h
+@@ -10,6 +10,8 @@
+ #include <QDialog>
+ #include <QMenuBar>
+ 
++#include <picojson.h>
++
+ #include "Common/Lazy.h"
+ #include "Core/NetPlayClient.h"
+ #include "DolphinQt/GameList/GameListModel.h"
+@@ -18,6 +20,7 @@
+ 
+ class BootSessionData;
+ class ChunkedProgressDialog;
++class NetcadeBridge;
+ class GameDigestDialog;
+ class PadMappingDialog;
+ class QCheckBox;
+@@ -99,6 +102,13 @@ public:
+ 
+   void SetHostWiiSyncData(std::vector<u64> titles, std::string redirect_folder) override;
+ 
++  // Netcade: the launcher drives the session over a local connection and shows its own UI, so this
++  // window stays hidden unless the player asks for it ("show"). Every option in this window can
++  // also be set from Netcade. If the launcher goes away, the window appears as usual.
++  void EnableNetcade(u16 control_port, const std::string& token);
++  bool IsNetcadeHidden() const;
++  void NetcadeNotify(const std::string& event, const std::string& detail = {});
++
+ signals:
+   void Stop();
+ 
+@@ -108,6 +118,11 @@ private:
+   void CreateMainLayout();
+   void ConnectWidgets();
+   void OnChat();
++
++  void OnNetcadeCommand(const picojson::object& command);
++  void SendNetcadeState();
++  std::string NetcadeStartGame(bool force);
++  std::string ApplyNetcadeOptions(const picojson::object& options);
+   void OnStart();
+   void DisplayMessage(const QString& msg, const std::string& color,
+                       int duration = OSD::Duration::NORMAL);
+@@ -181,4 +196,7 @@ private:
+   bool m_host_input_authority = false;
+ 
+   StartGameCallback m_start_game_callback;
++
++  std::unique_ptr<NetcadeBridge> m_netcade;
++  bool m_netcade_lost = false;
+ };
+diff --git a/Source/Core/DolphinQt/NetPlay/NetcadeBridge.cpp b/Source/Core/DolphinQt/NetPlay/NetcadeBridge.cpp
+new file mode 100644
+index 0000000..735cb1a
+--- /dev/null
++++ b/Source/Core/DolphinQt/NetPlay/NetcadeBridge.cpp
+@@ -0,0 +1,117 @@
++// Copyright 2026 Netcade contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "DolphinQt/NetPlay/NetcadeBridge.h"
++
++#include <utility>
++
++#include <SFML/Network/IpAddress.hpp>
++#include <SFML/Network/SocketSelector.hpp>
++#include <SFML/System/Time.hpp>
++
++#include "Common/Logging/Log.h"
++#include "Common/Thread.h"
++#include "Common/Version.h"
++
++NetcadeBridge::NetcadeBridge(u16 port, std::string token, CommandHandler on_command,
++                             StatusHandler on_status)
++    : m_port(port), m_token(std::move(token)), m_on_command(std::move(on_command)),
++      m_on_status(std::move(on_status))
++{
++  m_thread = std::thread([this] { Run(); });
++}
++
++NetcadeBridge::~NetcadeBridge()
++{
++  m_running = false;  // the reader wakes up at least every 200 ms to check this
++  if (m_thread.joinable())
++    m_thread.join();
++  std::lock_guard lock(m_send_mutex);
++  m_socket.disconnect();
++}
++
++void NetcadeBridge::Run()
++{
++  Common::SetCurrentThreadName("Netcade Bridge");
++
++  if (m_socket.connect(sf::IpAddress::LocalHost, m_port, sf::seconds(5)) != sf::Socket::Status::Done)
++  {
++    WARN_LOG_FMT(NETPLAY, "Netcade: could not reach the launcher on port {}", m_port);
++    m_on_status(false);
++    return;
++  }
++
++  m_connected = true;
++  picojson::object hello;
++  hello["ev"] = picojson::value("hello");
++  hello["token"] = picojson::value(m_token);
++  hello["version"] = picojson::value(Common::GetScmDescStr());
++  hello["protocol"] = picojson::value(1.0);
++  Send(hello);
++  m_on_status(true);
++
++  sf::SocketSelector selector;
++  selector.add(m_socket);
++  std::string buffer;
++  char chunk[4096];
++  while (m_running)
++  {
++    if (!selector.wait(sf::milliseconds(200)))
++      continue;
++    std::size_t received = 0;
++    if (m_socket.receive(chunk, sizeof(chunk), received) != sf::Socket::Status::Done)
++      break;
++    buffer.append(chunk, received);
++    if (buffer.size() > 1024 * 1024)  // a runaway line; Netcade never sends anything this big
++      break;
++
++    std::size_t newline;
++    while ((newline = buffer.find('\n')) != std::string::npos)
++    {
++      const std::string line = buffer.substr(0, newline);
++      buffer.erase(0, newline + 1);
++      if (line.empty())
++        continue;
++
++      picojson::value value;
++      const std::string error = picojson::parse(value, line);
++      if (!error.empty() || !value.is<picojson::object>())
++      {
++        WARN_LOG_FMT(NETPLAY, "Netcade: ignoring malformed command: {}", error);
++        continue;
++      }
++      m_on_command(value.get<picojson::object>());
++    }
++  }
++
++  m_connected = false;
++  if (m_running)
++  {
++    WARN_LOG_FMT(NETPLAY, "Netcade: lost the connection to the launcher");
++    m_on_status(false);
++  }
++}
++
++void NetcadeBridge::Send(const picojson::object& message)
++{
++  if (!m_connected)
++    return;
++  SendLine(picojson::value(message).serialize() + "\n");
++}
++
++bool NetcadeBridge::SendLine(const std::string& line)
++{
++  std::lock_guard lock(m_send_mutex);
++  std::size_t offset = 0;
++  while (offset < line.size())
++  {
++    std::size_t sent = 0;
++    const auto status = m_socket.send(line.data() + offset, line.size() - offset, sent);
++    offset += sent;
++    if (status == sf::Socket::Status::Partial)
++      continue;
++    if (status != sf::Socket::Status::Done)
++      return false;
++  }
++  return true;
++}
+diff --git a/Source/Core/DolphinQt/NetPlay/NetcadeBridge.h b/Source/Core/DolphinQt/NetPlay/NetcadeBridge.h
+new file mode 100644
+index 0000000..c4430db
+--- /dev/null
++++ b/Source/Core/DolphinQt/NetPlay/NetcadeBridge.h
+@@ -0,0 +1,56 @@
++// Copyright 2026 Netcade contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <atomic>
++#include <functional>
++#include <mutex>
++#include <string>
++#include <thread>
++
++#include <SFML/Network/TcpSocket.hpp>
++#include <picojson.h>
++
++#include "Common/CommonTypes.h"
++
++// Link to the Netcade launcher, which runs NetPlay sessions on Dolphin's behalf.
++//
++// Netcade listens on 127.0.0.1:<port> and starts Dolphin with --netcade-control=<port> (and the
++// session token in the NETCADE_TOKEN environment variable). Both sides exchange one JSON object
++// per line:
++//   Dolphin -> Netcade: {"ev": "hello" | "state" | "msg" | "started" | "stopped" | ...}
++//   Netcade -> Dolphin: {"cmd": "start" | "pads" | "buffer" | "options" | "show" | ...}
++//
++// Commands are delivered on the bridge's own thread; the owner moves them to the UI thread.
++class NetcadeBridge
++{
++public:
++  using CommandHandler = std::function<void(picojson::object)>;
++  using StatusHandler = std::function<void(bool connected)>;
++
++  NetcadeBridge(u16 port, std::string token, CommandHandler on_command, StatusHandler on_status);
++  ~NetcadeBridge();
++
++  NetcadeBridge(const NetcadeBridge&) = delete;
++  NetcadeBridge& operator=(const NetcadeBridge&) = delete;
++
++  // Safe to call from any thread. Dropped silently while not connected.
++  void Send(const picojson::object& message);
++  bool IsConnected() const { return m_connected; }
++
++private:
++  void Run();
++  bool SendLine(const std::string& line);
++
++  const u16 m_port;
++  const std::string m_token;
++  CommandHandler m_on_command;
++  StatusHandler m_on_status;
++
++  sf::TcpSocket m_socket;
++  std::mutex m_send_mutex;
++  std::atomic<bool> m_running{true};
++  std::atomic<bool> m_connected{false};
++  std::thread m_thread;
++};
+diff --git a/Source/Core/UICommon/CommandLineParse.cpp b/Source/Core/UICommon/CommandLineParse.cpp
+index 6b85545..3b6dd46 100644
+--- a/Source/Core/UICommon/CommandLineParse.cpp
++++ b/Source/Core/UICommon/CommandLineParse.cpp
+@@ -115,6 +115,26 @@ std::unique_ptr<optparse::OptionParser> CreateParser(ParserOptions options)
+         .action("store_true")
+         .help("Run Dolphin without the user interface (Requires --exec or --nand-title)");
+     parser->add_option("-c", "--confirm").action("store_true").help("Set Confirm on Stop");
++
++    // Netcade launcher integration: start a NetPlay session right away, driven by Netcade
++    parser->add_option("--netcade-host")
++        .dest("netcade_host")
++        .action("store")
++        .metavar("<file>")
++        .type("string")
++        .help("Netcade: host a NetPlay session of this game");
++    parser->add_option("--netcade-join")
++        .dest("netcade_join")
++        .action("store")
++        .metavar("<file>")
++        .type("string")
++        .help("Netcade: join the configured NetPlay session (this file is your copy of the game)");
++    parser->add_option("--netcade-control")
++        .dest("netcade_control")
++        .action("store")
++        .metavar("<port>")
++        .type("string")
++        .help("Netcade: local port of the launcher's control connection");
+   }
+ 
+   parser->set_defaults("video_backend", "");

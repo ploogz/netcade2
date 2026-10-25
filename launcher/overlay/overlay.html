@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+  <title>Netcade overlay</title>
+  <link rel="stylesheet" href="overlay.css">
+</head>
+<body class="corners">
+  <!--
+    Two columns. With a 4:3 game on a wide screen they sit in the black bars beside the picture;
+    otherwise they shrink into the corners. Anything with class "hit" captures the mouse; the rest
+    of the screen clicks through to the game.
+  -->
+  <aside id="left" class="side">
+    <section id="roster" class="hit"></section>
+    <section id="feed"></section>
+    <section id="panel" class="hit" hidden>
+      <div id="log"></div>
+      <form id="chatForm" autocomplete="off">
+        <input id="chatInput" maxlength="300" placeholder="Say something… (Enter sends, Esc closes)">
+      </form>
+    </section>
+    <button id="chatBtn" class="hit" title="Chat">💬 <span id="chatKeyLabel">Tab</span> to chat</button>
+  </aside>
+
+  <aside id="right" class="side">
+    <section id="match"></section>
+    <section id="requests"></section>
+    <section id="notices"></section>
+  </aside>
+
+  <script src="overlay.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# One-click deploy of the Netcade lobby server on Render's free plan:
+# Render dashboard -> New -> Blueprint -> pick this repository.
+services:
+  - type: web
+    name: netcade-server
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install --omit=dev
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: TRUST_PROXY
+        value: "1"
+      - key: NODE_VERSION
+        value: "22"

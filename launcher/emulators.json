@@ -1,0 +1,47 @@
+{
+  "_comment": "Emulators bundled into Netcade installers by scripts/fetch-emulators.js. Every player on the same Netcade release gets identical versions, which netplay requires. Bump versions here, then tag a new release.",
+  "dolphin": {
+    "version": "2609a",
+    "source": "https://github.com/dolphin-emu/dolphin/tree/2609a",
+    "license": "GPL-2.0-or-later",
+    "netcade": {
+      "_comment": "Netcade's build of this Dolphin release (dolphin-netcade/ in this repo): hosts and joins NetPlay on command so GameCube matches start from Netcade with no Dolphin windows. Used instead of the official build when a dolphin-netcade.7z ships inside the installer, or when url is set (e.g. a GitHub release asset).",
+      "version": "2609a-netcade1",
+      "win-x64": { "url": "" }
+    },
+    "win-x64": { "url": "https://dl.dolphin-emu.org/releases/2609a/dolphin-2609a-x64.7z", "exe": "Dolphin.exe" },
+    "mac": { "url": "https://dl.dolphin-emu.org/releases/2609a/dolphin-2609a-universal.dmg", "app": "Dolphin.app", "exe": "Dolphin.app/Contents/MacOS/Dolphin" },
+    "linux-x64": {
+      "github": "pkgforge-dev/Dolphin-emu-AppImage",
+      "tagPrefix": "2609a@",
+      "assetPattern": "x86_64.*\\.AppImage$",
+      "note": "Dolphin publishes no standalone Linux build; this is the community AppImage of the same release."
+    }
+  },
+  "retroarch": {
+    "version": "1.22.2",
+    "source": "https://github.com/libretro/RetroArch/tree/v1.22.2",
+    "license": "GPL-3.0-or-later",
+    "win-x64": { "url": "https://buildbot.libretro.com/stable/1.22.2/windows/x86_64/RetroArch.7z", "exe": "retroarch.exe" },
+    "mac": { "url": "https://buildbot.libretro.com/stable/1.22.2/apple/osx/universal/RetroArch_Metal.dmg", "app": "RetroArch.app", "exe": "RetroArch.app/Contents/MacOS/RetroArch" },
+    "linux-x64": { "url": "https://buildbot.libretro.com/stable/1.22.2/linux/x86_64/RetroArch.7z", "appimage": true }
+  },
+  "n64core": {
+    "name": "Mupen64Plus-Next",
+    "source": "https://github.com/libretro/mupen64plus-libretro-nx",
+    "license": "GPL-2.0",
+    "win-x64": "https://buildbot.libretro.com/nightly/windows/x86_64/latest/mupen64plus_next_libretro.dll.zip",
+    "mac-x64": "https://buildbot.libretro.com/nightly/apple/osx/x86_64/latest/mupen64plus_next_libretro.dylib.zip",
+    "mac-arm64": "https://buildbot.libretro.com/nightly/apple/osx/arm64/latest/mupen64plus_next_libretro.dylib.zip",
+    "linux-x64": "https://buildbot.libretro.com/nightly/linux/x86_64/latest/mupen64plus_next_libretro.so.zip"
+  },
+  "autoconfig": {
+    "url": "https://github.com/libretro/retroarch-joypad-autoconfig/archive/refs/heads/master.zip",
+    "source": "https://github.com/libretro/retroarch-joypad-autoconfig",
+    "drivers": { "win": ["xinput", "dinput", "sdl2", "hid"], "mac": ["mfi", "hid", "sdl2"], "linux": ["udev", "sdl2", "linuxraw"] }
+  },
+  "vcredist": {
+    "url": "https://aka.ms/vs/17/release/vc_redist.x64.exe",
+    "note": "Microsoft Visual C++ runtime that Dolphin needs on Windows; installed silently by the Netcade installer."
+  }
+}

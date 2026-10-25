@@ -1,0 +1,132 @@
+{
+  "name": "netcade",
+  "productName": "Netcade",
+  "version": "1.5.0",
+  "description": "Plug-and-play online N64 and GameCube: lobbies, chat and one-click netplay with Dolphin and RetroArch built in.",
+  "main": "main.js",
+  "author": "Netcade contributors",
+  "license": "MIT",
+  "homepage": "https://github.com/YOUR-GITHUB-USER/netcade",
+  "scripts": {
+    "start": "node scripts/sync-server.js && electron .",
+    "test": "node --test test/*.test.js",
+    "sync-server": "node scripts/sync-server.js",
+    "dist": "node scripts/sync-server.js && node scripts/fetch-emulators.js && electron-builder",
+    "dist:win": "node scripts/sync-server.js && node scripts/fetch-emulators.js --os win && electron-builder --win",
+    "dist:mac": "node scripts/sync-server.js && node scripts/fetch-emulators.js --os mac && electron-builder --mac",
+    "dist:linux": "node scripts/sync-server.js && node scripts/fetch-emulators.js --os linux && electron-builder --linux",
+    "fetch-emulators": "node scripts/fetch-emulators.js"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "electron-updater": "^6.3.9",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "7zip-bin": "^5.2.0"
+  },
+  "build": {
+    "appId": "io.netcade.launcher",
+    "productName": "Netcade",
+    "artifactName": "Netcade-${version}-${os}-${arch}.${ext}",
+    "files": [
+      "main.js",
+      "preload.js",
+      "netcade.config.json",
+      "emulators.json",
+      "lib/**",
+      "renderer/**",
+      "overlay/**",
+      "build/icon.png",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "protocols": [
+      {
+        "name": "Netcade invite",
+        "schemes": [
+          "netcade"
+        ]
+      }
+    ],
+    "publish": [
+      {
+        "provider": "github"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "include": "build/installer.nsh"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.games",
+      "icon": "build/icon.png",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Game",
+      "icon": "build/icon.png",
+      "mimeTypes": [
+        "x-scheme-handler/netcade"
+      ]
+    },
+    "extraResources": [
+      {
+        "from": "vendor/${os}-${arch}",
+        "to": "vendor",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "node_modules/7zip-bin/${os}/${arch}",
+        "to": "bin",
+        "filter": [
+          "7za*"
+        ]
+      },
+      {
+        "from": "vendor",
+        "to": ".",
+        "filter": [
+          "dolphin-netcade.7z",
+          "dolphin-netcade.zip"
+        ]
+      }
+    ]
+  }
+}
